@@ -6,77 +6,181 @@
 #include "exceptions.hpp"
 
 namespace sjtu {
+
 /**
- * @brief a container like std::priority_queue which is a heap internal.
- * **Exception Safety**: The `Compare` operation might throw exceptions for certain data.
- * In such cases, any ongoing operation should be terminated, and the priority queue should be restored to its original state before the operation began.
+ * A max-priority queue implemented as a leftist heap.
+ *
+ * Meld follows only right spines, so push, pop and merge are O(log n)
+ * (merge is O(log(n + m))).  In meld all comparisons are completed on the
+ * way down and pointers are changed only while the recursion unwinds.  Thus
+ * a throwing comparator leaves every input tree unchanged.
  */
-template<typename T, class Compare = std::less<T>>
+template<typename T, class Compare = std::less<T> >
 class priority_queue {
+private:
+	struct node {
+		T value;
+		node *left;
+		node *right;
+		size_t rank;
+
+		explicit node(const T &v)
+			: value(v), left(NULL), right(NULL), rank(1) {}
+	};
+
+	node *root;
+	size_t count;
+	Compare compare;
+
+	static size_t get_rank(const node *p) {
+		return p == NULL ? 0 : p->rank;
+	}
+
+	/*
+	 * No pointer is modified before the recursive call succeeds.  Once that
+	 * call has succeeded there are no more potentially-throwing operations.
+	 */
+	node *meld(node *a, node *b) {
+		if (a == NULL) return b;
+		if (b == NULL) return a;
+		if (compare(a->value, b->value)) {
+			node *tmp = a;
+			a = b;
+			b = tmp;
+		}
+		node *new_right = meld(a->right, b);
+		a->right = new_right;
+		if (get_rank(a->left) < get_rank(a->right)) {
+			node *tmp = a->left;
+			a->left = a->right;
+			a->right = tmp;
+		}
+		a->rank = get_rank(a->right) + 1;
+		return a;
+	}
+
+	/* Constant-extra-space destruction also handles a degenerate left spine. */
+	static void destroy(node *p) {
+		while (p != NULL) {
+			if (p->left != NULL) {
+				node *next = p->left;
+				p->left = next->right;
+				next->right = p;
+				p = next;
+			} else {
+				node *next = p->right;
+				delete p;
+				p = next;
+			}
+		}
+	}
+
+	/*
+	 * Iterate down left links (which may form a linear chain).  Only right
+	 * subtrees are recursive; their height is logarithmic in a leftist heap.
+	 */
+	static node *clone(const node *p) {
+		if (p == NULL) return NULL;
+		node *result = NULL;
+		node *tail = NULL;
+		try {
+			while (p != NULL) {
+				node *copy = new node(p->value);
+				if (result == NULL) result = copy;
+				else tail->left = copy;
+				tail = copy;
+				copy->rank = p->rank;
+				copy->right = clone(p->right);
+				p = p->left;
+			}
+		} catch (...) {
+			destroy(result);
+			throw;
+		}
+		return result;
+	}
+
 public:
-	/**
-	 * @brief default constructor
-	 */
-	priority_queue() {}
+	priority_queue() : root(NULL), count(0), compare() {}
 
-	/**
-	 * @brief copy constructor
-	 * @param other the priority_queue to be copied
-	 */
-	priority_queue(const priority_queue &other) {}
+	priority_queue(const priority_queue &other)
+		: root(NULL), count(other.count), compare(other.compare) {
+		root = clone(other.root);
+	}
 
-	/**
-	 * @brief deconstructor
-	 */
-	~priority_queue() {}
+	~priority_queue() {
+		destroy(root);
+	}
 
-	/**
-	 * @brief Assignment operator
-	 * @param other the priority_queue to be assigned from
-	 * @return a reference to this priority_queue after assignment
-	 */
-	priority_queue &operator=(const priority_queue &other) {}
+	priority_queue &operator=(const priority_queue &other) {
+		if (this == &other) return *this;
+		/* Clone first, giving the contained values the strong guarantee. */
+		node *new_root = clone(other.root);
+		try {
+			compare = other.compare;
+		} catch (...) {
+			destroy(new_root);
+			throw;
+		}
+		destroy(root);
+		root = new_root;
+		count = other.count;
+		return *this;
+	}
 
-	/**
-	 * @brief get the top element of the priority queue.
-	 * @return a reference of the top element.
-	 * @throws container_is_empty if empty() returns true
-	 */
-	const T & top() const {}
+	const T &top() const {
+		if (root == NULL) throw container_is_empty();
+		return root->value;
+	}
 
-	/**
-	 * @brief push new element to the priority queue.
-	 * @param e the element to be pushed
-	 */
-	void push(const T &e) {}
+	void push(const T &e) {
+		node *added = new node(e);
+		try {
+			root = meld(root, added);
+		} catch (...) {
+			delete added;
+			throw runtime_error();
+		}
+		++count;
+	}
 
-	/**
-	 * @brief delete the top element from the priority queue.
-	 * @throws container_is_empty if empty() returns true
-	 */
-	void pop() {}
+	void pop() {
+		if (root == NULL) throw container_is_empty();
+		node *old_root = root;
+		node *new_root;
+		try {
+			new_root = meld(old_root->left, old_root->right);
+		} catch (...) {
+			throw runtime_error();
+		}
+		root = new_root;
+		delete old_root;
+		--count;
+	}
 
-	/**
-	 * @brief return the number of elements in the priority queue.
-	 * @return the number of elements.
-	 */
-	size_t size() const {}
+	size_t size() const {
+		return count;
+	}
 
-	/**
-	 * @brief check if the container is empty.
-	 * @return true if it is empty, false otherwise.
-	 */
-	bool empty() const {}
+	bool empty() const {
+		return count == 0;
+	}
 
-	/**
-	 * @brief merge another priority_queue into this one.
-	 * The other priority_queue will be cleared after merging.
-	 * The complexity is at most O(logn).
-	 * @param other the priority_queue to be merged.
-	 */
-	void merge(priority_queue &other) {}
+	void merge(priority_queue &other) {
+		if (this == &other) return;
+		node *new_root;
+		try {
+			new_root = meld(root, other.root);
+		} catch (...) {
+			throw runtime_error();
+		}
+		root = new_root;
+		count += other.count;
+		other.root = NULL;
+		other.count = 0;
+	}
 };
 
-}
+} // namespace sjtu
 
 #endif
